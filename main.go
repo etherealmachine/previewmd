@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"text/template"
 
 	"code.google.com/p/go.exp/fsnotify"
@@ -13,13 +14,19 @@ import (
 	"github.com/russross/blackfriday"
 )
 
-var mdFile = flag.String("f", "", "Markdown file to preview")
+var (
+	mdFile = flag.String("f", "", "Markdown file to preview")
+	port   = flag.Int("port", 8080, "Port to listen on")
 
-var tmpl = `<!doctype html>
+	fileChanged chan bool
+	tmpl        *template.Template
+)
+
+var tmplText = `<!doctype html>
 <html>
 	<head>
 		<script>
-			var s = new WebSocket('ws://localhost:8080/ws');
+			var s = new WebSocket('ws://localhost:{{ .Port }}/ws');
 			s.onopen = function(e) {
 				console.log(e)
 			};
@@ -34,23 +41,39 @@ var tmpl = `<!doctype html>
 			};
 		</script>
 	</head>
-	<body>{{ . }}</body>
+	<body>{{ .MarkdownText }}</body>
 </html>
 `
 
-var fileChanged chan bool
-
 func init() {
 	fileChanged = make(chan bool, 0)
+	tmpl = template.Must(template.New("index").Parse(tmplText))
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	fileBytes, err := ioutil.ReadFile(*mdFile)
+	if err != nil {
+		fmt.Fprintf(w, "error reading file: %v", err)
+		return
+	}
+	mdText := string(blackfriday.MarkdownCommon(fileBytes))
+	err = tmpl.Execute(w, struct {
+		Port         int
+		MarkdownText string
+	}{
+		Port:         *port,
+		MarkdownText: mdText,
+	})
+	if err != nil {
+		fmt.Fprintf(w, "error writing HTTP response: %v", err)
+	}
 }
 
 func websocketHandler(w http.ResponseWriter, r *http.Request) {
-	c, err := upgrader.Upgrade(w, r, nil)
+	c, err := (&websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}).Upgrade(w, r, nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -68,34 +91,32 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func watchFile(f string, c chan bool) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Printf("error watching %q: %v", f, err)
+	}
+	if err := w.Watch(f); err != nil {
+		log.Printf("error watching %q: %v", f, err)
+	}
+	for _ = range w.Event {
+		c <- true
+	}
+}
+
 func main() {
 	flag.Parse()
-	t := template.Must(template.New("index").Parse(tmpl))
 	if *mdFile == "" {
-		log.Fatal("Markdown file must be specified (--f)")
+		fmt.Println("Markdown file must be specified (-f)")
+		flag.Usage()
+		os.Exit(1)
 	}
 	if _, err := ioutil.ReadFile(*mdFile); err != nil {
 		log.Fatalf("error reading %q: %v", *mdFile, err)
 	}
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Printf("error watching %q: %v", *mdFile, err)
-	}
-	if err := w.Watch(*mdFile); err != nil {
-		log.Printf("error watching %q: %v", *mdFile, err)
-	}
-	go func() {
-		for _ = range w.Event {
-			fileChanged <- true
-		}
-	}()
+	go watchFile(*mdFile, fileChanged)
+	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", websocketHandler)
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if mdBytes, err := ioutil.ReadFile(*mdFile); err != nil {
-			fmt.Fprintf(w, "error reading file: %v", err)
-		} else if err := t.Execute(w, string(blackfriday.MarkdownCommon(mdBytes))); err != nil {
-			fmt.Fprintf(w, "error writing HTTP response: %v", err)
-		}
-	})
-	log.Fatal(http.ListenAndServe("localhost:8080", nil))
+	fmt.Printf("Preview file at http://localhost:%d\n", *port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf("localhost:%d", *port), nil))
 }
