@@ -9,7 +9,7 @@ import (
 	"os"
 	"text/template"
 
-	"code.google.com/p/go.exp/fsnotify"
+	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	"github.com/russross/blackfriday"
 )
