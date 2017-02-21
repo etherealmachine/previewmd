@@ -96,10 +96,7 @@ func watchFile(f string, c chan bool) {
 	if err != nil {
 		log.Printf("error watching %q: %v", f, err)
 	}
-	if err := w.Watch(f); err != nil {
-		log.Printf("error watching %q: %v", f, err)
-	}
-	for _ = range w.Event {
+	for _ = range w.Events {
 		c <- true
 	}
 }
